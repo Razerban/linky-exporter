@@ -1,0 +1,17 @@
+---
+go:
+    version: 1.19
+repository:
+    path: github.com/razerban/linky-exporter
+build:
+    flags: -mod=vendor -buildmode=exe -tags=netgo -installsuffix=cgo -trimpath
+    ldflags: |
+        -s
+        -w
+        -extldflags "-fno-PIC -static"
+        -X=github.com/prometheus/common/version.Version={{.Version}}
+        -X=github.com/prometheus/common/version.Revision={{.Revision}}
+        -X=github.com/prometheus/common/version.Branch={{.Branch}}
+        -X=github.com/prometheus/common/version.BuildUser={{user}}@{{host}}
+        -X=github.com/prometheus/common/version.BuildDate={{date "20060102-15:04:05"}}
+...

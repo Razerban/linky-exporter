@@ -1,13 +1,17 @@
-FROM golang:1.19 as builder
-RUN mkdir /build
-ADD . /build/
-WORKDIR /build
-RUN CGO_ENABLED=0 GOOS=linux make build
+FROM golang:1.19-alpine AS builder
 
+COPY . /go/src/linky-exporter
 
-FROM alpine:3
-ARG VERSION
-COPY --from=builder /build/dist/linky-exporter-${VERSION}-linux-amd64 linky-exporter
-RUN addgroup -S exporter && adduser -S exporter -G exporter
-USER exporter
-ENTRYPOINT [ "./linky-exporter" ]
+WORKDIR /go/src/linky-exporter
+
+RUN apk add --no-cache make curl tar && \
+    go mod vendor && \
+    make build
+
+FROM alpine:latest
+LABEL maintainer="Ahmed Abdelkafi <abdelkafiahmed@yahoo.fr>"
+
+COPY --from=builder /go/src/linky-exporter/linky-exporter /bin/linky-exporter
+
+ENTRYPOINT ["/bin/linky-exporter"]
+EXPOSE     9901

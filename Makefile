@@ -1,44 +1,293 @@
-empty :=
-PROJECT_NAME := linky-exporter
-DIST_FOLDER := dist
-TAG_NAME := $(shell git tag -l --contains HEAD | head -n1)
-GOOSARCH := $(shell go version | cut -d' ' -f4)
-GOOS ?= $(shell echo ${GOOSARCH} | cut -d'/' -f1)
-GOARCH ?= $(shell echo ${GOOSARCH} | cut -d'/' -f2)
-VERSION ?= $(subst v,$(empty),$(TAG_NAME))
+# Copyright 2018 The Prometheus Authors
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
-ifeq ($(GOARCH), arm)
-    ARCH := armv$(GOARM)
+
+# A common Makefile that includes rules to be reused in different prometheus projects.
+# !!! Open PRs only against the prometheus/prometheus/Makefile.common repository!
+
+# Example usage :
+# Create the main Makefile in the root project directory.
+# include Makefile.common
+# customTarget:
+# 	@echo ">> Running customTarget"
+#
+
+# Ensure GOBIN is not set during build so that promu is installed to the correct path
+unexport GOBIN
+
+GO           ?= go
+GOFMT        ?= $(GO)fmt
+FIRST_GOPATH := $(firstword $(subst :, ,$(shell $(GO) env GOPATH)))
+GOOPTS       ?=
+GOHOSTOS     ?= $(shell $(GO) env GOHOSTOS)
+GOHOSTARCH   ?= $(shell $(GO) env GOHOSTARCH)
+
+GO_VERSION        ?= $(shell $(GO) version)
+GO_VERSION_NUMBER ?= $(word 3, $(GO_VERSION))
+PRE_GO_111        ?= $(shell echo $(GO_VERSION_NUMBER) | grep -E 'go1\.(10|[0-9])\.')
+
+GOVENDOR :=
+GO111MODULE :=
+ifeq (, $(PRE_GO_111))
+	ifneq (,$(wildcard go.mod))
+		# Enforce Go modules support just in case the directory is inside GOPATH (and for Travis CI).
+		GO111MODULE := on
+
+		ifneq (,$(wildcard vendor))
+			# Always use the local vendor/ directory to satisfy the dependencies.
+			GOOPTS := $(GOOPTS) -mod=vendor
+		endif
+	endif
 else
-    ARCH := $(GOARCH)
+	ifneq (,$(wildcard go.mod))
+		ifneq (,$(wildcard vendor))
+$(warning This repository requires Go >= 1.11 because of Go modules)
+$(warning Some recipes may not work as expected as the current Go runtime is '$(GO_VERSION_NUMBER)')
+		endif
+	else
+		# This repository isn't using Go modules (yet).
+		GOVENDOR := $(FIRST_GOPATH)/bin/govendor
+	endif
+endif
+PROMU        := $(FIRST_GOPATH)/bin/promu
+pkgs          = ./...
+
+ifeq (arm, $(GOHOSTARCH))
+	GOHOSTARM ?= $(shell GOARM= $(GO) env GOARM)
+	GO_BUILD_PLATFORM ?= $(GOHOSTOS)-$(GOHOSTARCH)v$(GOHOSTARM)
+else
+	GO_BUILD_PLATFORM ?= $(GOHOSTOS)-$(GOHOSTARCH)
 endif
 
-default: build
+PROMU_VERSION ?= 0.14.0
+PROMU_URL     := https://github.com/prometheus/promu/releases/download/v$(PROMU_VERSION)/promu-$(PROMU_VERSION).$(GO_BUILD_PLATFORM).tar.gz
 
-dist:
-	mkdir $(DIST_FOLDER)
-
-build: dist
-	go mod vendor
-	go build -o $(DIST_FOLDER)/$(PROJECT_NAME)-$(VERSION)-$(GOOS)-$(ARCH) -ldflags "-X main.version=$(VERSION)" cmd/$(PROJECT_NAME)/main.go
-
-clean:
-	rm -rf $(DIST_FOLDER)
-
-version:
-	echo $(VERSION)
-
-info:
-	echo "PROJECT_NAME = $(PROJECT_NAME)"
-	echo "DIST_FOLDER = $(DIST_FOLDER)"
-	echo "TAG_NAME = $(TAG_NAME)"
-	echo "GOOSARCH = $(GOOSARCH)"
-	echo "GOOS = $(GOOS)"
-	echo "GOARCH = $(GOARCH)"
-	echo "VERSION = $(VERSION)"
-
-docker:
-	docker build -t syberalexis/linky-exporter:latest --build-arg VERSION=$(VERSION) .
-ifneq ($(VERSION),)
-	docker tag syberalexis/linky-exporter syberalexis/linky-exporter:$(VERSION)
+GOLANGCI_LINT :=
+GOLANGCI_LINT_VERSION ?= v1.16.0
+# golangci-lint only supports linux, darwin and windows platforms on i386/amd64.
+# windows isn't included here because of the path separator being different.
+ifeq ($(GOHOSTOS),$(filter $(GOHOSTOS),linux darwin))
+	ifeq ($(GOHOSTARCH),$(filter $(GOHOSTARCH),amd64 i386))
+		GOLANGCI_LINT := $(FIRST_GOPATH)/bin/golangci-lint
+	endif
 endif
+
+PREFIX                  ?= $(shell pwd)
+BIN_DIR                 ?= $(shell pwd)
+
+DOCKER_REPO             ?= razerban
+DOCKER_IMAGE_NAME		?= linky_exporter
+DOCKER_IMAGE_TAG        ?= $(subst /,-,$(shell git describe --tags --abbrev=0))
+
+DOCKER_PLATFORMS        ?= linux/arm/v6,linux/arm/v7,linux/arm64
+
+ifeq ($(GOHOSTARCH),amd64)
+        ifeq ($(GOHOSTOS),$(filter $(GOHOSTOS),linux freebsd darwin windows))
+                # Only supported on amd64
+                test-flags := -race
+        endif
+endif
+
+# This rule is used to forward a target like "build" to "common-build".  This
+# allows a new "build" target to be defined in a Makefile which includes this
+# one and override "common-build" without override warnings.
+%: common-% ;
+
+.PHONY: common-clean
+common-clean:
+	@echo ">> deleting vendor directory"
+	rm -rf vendor
+	@echo ">> deleting .build directory"
+	rm -rf .build
+	@echo ">> deleting linky-exporter binary file"
+	rm -f linky-exporter
+
+.PHONY: common-cleanup
+common-cleanup: common-clean
+
+.PHONY: common-all
+common-all: common-all-without-test test
+
+.PHONY: common-all-without-test
+common-all-without-test: precheck format vet style check_license lint unused build
+
+.PHONY: common-style
+common-style:
+	@echo ">> checking code style"
+	@fmtRes=$$($(GOFMT) -d $$(find . -path ./vendor -prune -o -name '*.go' -print)); \
+	if [ -n "$${fmtRes}" ]; then \
+		echo "gofmt checking failed!"; echo "$${fmtRes}"; echo; \
+		echo "Please ensure you are using $$($(GO) version) for formatting code."; \
+		exit 1; \
+	fi
+
+.PHONY: common-check_license
+common-check_license:
+	@echo ">> checking license header"
+	@licRes=$$(for file in $$(find . -type f -iname '*.go' ! -path './vendor/*') ; do \
+               awk 'NR<=3' $$file | grep -Eq "(Copyright|generated|GENERATED)" || echo $$file; \
+       done); \
+       if [ -n "$${licRes}" ]; then \
+               echo "license header checking failed:"; echo "$${licRes}"; \
+               exit 1; \
+       fi
+
+.PHONY: common-deps
+common-deps:
+	@echo ">> getting dependencies"
+ifdef GO111MODULE
+	GO111MODULE=$(GO111MODULE) $(GO) mod download
+else
+	$(GO) get $(GOOPTS) -t ./...
+endif
+
+.PHONY: common-test-short
+common-test-short:
+	@echo ">> running short tests"
+	GO111MODULE=$(GO111MODULE) $(GO) test -short $(GOOPTS) $(pkgs)
+
+.PHONY: common-test
+common-test:
+	@echo ">> running all tests"
+	GO111MODULE=$(GO111MODULE) $(GO) test $(test-flags) $(GOOPTS) $(pkgs)
+
+.PHONY: common-format
+common-format:
+	@echo ">> formatting code"
+	GO111MODULE=$(GO111MODULE) $(GO) fmt $(pkgs)
+
+.PHONY: common-vet
+common-vet:
+	@echo ">> vetting code"
+	GO111MODULE=$(GO111MODULE) $(GO) vet $(GOOPTS) $(pkgs)
+
+.PHONY: common-lint
+common-lint: $(GOLANGCI_LINT)
+ifdef GOLANGCI_LINT
+	@echo ">> running golangci-lint"
+ifdef GO111MODULE
+# 'go list' needs to be executed before staticcheck to prepopulate the modules cache.
+# Otherwise staticcheck might fail randomly for some reason not yet explained.
+	GO111MODULE=$(GO111MODULE) $(GO) list -e -compiled -test=true -export=false -deps=true -find=false -tags= -- ./... > /dev/null
+	GO111MODULE=$(GO111MODULE) $(GOLANGCI_LINT) run $(pkgs)
+else
+	$(GOLANGCI_LINT) run $(pkgs)
+endif
+endif
+
+# For backward-compatibility.
+.PHONY: common-staticcheck
+common-staticcheck: lint
+
+.PHONY: common-unused
+common-unused: $(GOVENDOR)
+ifdef GOVENDOR
+	@echo ">> running check for unused packages"
+	@$(GOVENDOR) list +unused | grep . && exit 1 || echo 'No unused packages'
+else
+ifdef GO111MODULE
+	@echo ">> running check for unused/missing packages in go.mod"
+	GO111MODULE=$(GO111MODULE) $(GO) mod tidy
+ifeq (,$(wildcard vendor))
+#	@git diff --exit-code -- go.sum go.mod
+else
+	@echo ">> running check for unused packages in vendor/"
+	GO111MODULE=$(GO111MODULE) $(GO) mod vendor
+#	@git diff --exit-code -- go.sum go.mod vendor/
+endif
+endif
+endif
+
+.PHONY: common-build
+common-build: promu
+	@echo ">> building binaries"
+	GO111MODULE=$(GO111MODULE) $(PROMU) build --prefix $(PREFIX)
+
+.PHONY: common-crossbuild
+common-crossbuild: promu
+	@echo ">> cross-building binaries"
+	GO111MODULE=$(GO111MODULE) $(PROMU) crossbuild
+
+.PHONY: common-tarball
+common-tarball: promu
+	@echo ">> building release tarball"
+	$(PROMU) tarball --prefix $(PREFIX) $(BIN_DIR)
+
+.PHONY: common-docker
+common-docker: common-docker-build
+
+.PHONY: common-docker-build
+common-docker-build:
+	docker build -t "$(DOCKER_REPO)/$(DOCKER_IMAGE_NAME):$(DOCKER_IMAGE_TAG)" .
+
+.PHONY: common-docker-buildx
+common-docker-buildx:
+	docker buildx build -t "$(DOCKER_REPO)/$(DOCKER_IMAGE_NAME):$(DOCKER_IMAGE_TAG)" -t "$(DOCKER_REPO)/$(DOCKER_IMAGE_NAME):latest" \
+		--platform "$(DOCKER_PLATFORMS)" \
+		.
+
+.PHONY: common-docker-buildx-publish
+common-docker-buildx-publish: common-docker-publish
+
+.PHONY: common-docker-publish
+common-docker-publish:
+	docker buildx build -t "$(DOCKER_REPO)/$(DOCKER_IMAGE_NAME):$(DOCKER_IMAGE_TAG)" -t "$(DOCKER_REPO)/$(DOCKER_IMAGE_NAME):latest" \
+		--platform "$(DOCKER_PLATFORMS)" \
+		--push \
+		.
+
+.PHONY: common-docker-compose
+common-docker-compose:
+	docker compose up -v
+
+.PHONY: promu
+promu: $(PROMU)
+
+$(PROMU):
+	$(eval PROMU_TMP := $(shell mktemp -d))
+	curl -s -L $(PROMU_URL) | tar -xvzf - -C $(PROMU_TMP)
+	mkdir -p $(FIRST_GOPATH)/bin
+	cp $(PROMU_TMP)/promu-$(PROMU_VERSION).$(GO_BUILD_PLATFORM)/promu $(FIRST_GOPATH)/bin/promu
+	rm -r $(PROMU_TMP)
+
+.PHONY: proto
+proto:
+	@echo ">> generating code from proto files"
+	@./scripts/genproto.sh
+
+ifdef GOLANGCI_LINT
+$(GOLANGCI_LINT):
+	mkdir -p $(FIRST_GOPATH)/bin
+	curl -sfL https://install.goreleaser.com/github.com/golangci/golangci-lint.sh | sh -s -- -b $(FIRST_GOPATH)/bin $(GOLANGCI_LINT_VERSION)
+endif
+
+ifdef GOVENDOR
+.PHONY: $(GOVENDOR)
+$(GOVENDOR):
+	GOOS= GOARCH= $(GO) get -u github.com/kardianos/govendor
+endif
+
+.PHONY: precheck
+precheck::
+
+define PRECHECK_COMMAND_template =
+precheck:: $(1)_precheck
+
+PRECHECK_COMMAND_$(1) ?= $(1) $$(strip $$(PRECHECK_OPTIONS_$(1)))
+.PHONY: $(1)_precheck
+$(1)_precheck:
+	@if ! $$(PRECHECK_COMMAND_$(1)) 1>/dev/null 2>&1; then \
+		echo "Execution of '$$(PRECHECK_COMMAND_$(1))' command failed. Is $(1) installed?"; \
+		exit 1; \
+	fi
+endef

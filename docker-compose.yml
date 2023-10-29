@@ -1,0 +1,25 @@
+---
+version: "3.8"
+services:
+  linky_exporter:
+    image: Razerban/linky_exporter
+    restart: unless-stopped
+    container_name: linky-exporter
+    user: USER_ID:GROUP_ID
+    expose:
+      - 9901/tcp
+    command:
+      - "--standard"
+      - "--baud=9600"
+      - "--size=7"
+      - "--parity=E"
+      - "--stopbits=Stop1"
+      - "--device=/dev/linky_dongle"
+    environment:
+      - "TZ=Europe/Paris"
+    volumes:
+      - /etc/localtime:/etc/localtime:ro
+      - /etc/timezone:/etc/timezone:ro
+    devices:
+      - /dev/ttyUSB0:/dev/linky_dongle
+...
