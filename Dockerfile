@@ -1,4 +1,4 @@
-FROM golang:1.19-alpine AS builder
+FROM golang:1.22.3-alpine AS builder
 
 COPY . /go/src/linky-exporter
 

@@ -63,7 +63,7 @@ PROMU        := $(FIRST_GOPATH)/bin/promu
 pkgs          = ./...
 
 ifeq (arm, $(GOHOSTARCH))
-	GOHOSTARM ?= $(shell GOARM= $(GO) env GOARM)
+	GOHOSTARM ?= $(shell GOARM= $(GO) env GOARM | cut -d, -f1)
 	GO_BUILD_PLATFORM ?= $(GOHOSTOS)-$(GOHOSTARCH)v$(GOHOSTARM)
 else
 	GO_BUILD_PLATFORM ?= $(GOHOSTOS)-$(GOHOSTARCH)
@@ -73,7 +73,7 @@ PROMU_VERSION ?= 0.17.0
 PROMU_URL     := https://github.com/prometheus/promu/releases/download/v$(PROMU_VERSION)/promu-$(PROMU_VERSION).$(GO_BUILD_PLATFORM).tar.gz
 
 GOLANGCI_LINT :=
-GOLANGCI_LINT_VERSION ?= v1.16.0
+GOLANGCI_LINT_VERSION ?= v1.22.3
 # golangci-lint only supports linux, darwin and windows platforms on i386/amd64.
 # windows isn't included here because of the path separator being different.
 ifeq ($(GOHOSTOS),$(filter $(GOHOSTOS),linux darwin))
